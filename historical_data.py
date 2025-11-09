@@ -9,11 +9,29 @@ BASE_URL = "https://hackutd2025.eog.systems/api"
 st.set_page_config(page_title="CauldronWatch Time Series", layout="wide")
 st.title("🧪 CauldronWatch: Potion Level Time Series & Ticket Overlay")
 
+# Add auto-refresh controls
+st.sidebar.header("🔄 Auto-Refresh")
+auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=True)
+if auto_refresh:
+    refresh_interval = st.sidebar.selectbox(
+        "Refresh Interval",
+        options=[30, 60, 120, 300],
+        format_func=lambda x: f"{x} seconds",
+        index=1  # Default to 60 seconds
+    )
+    st.sidebar.info(f"Page will refresh every {refresh_interval} seconds")
+    # Auto-refresh using meta tag
+    st.markdown(f'<meta http-equiv="refresh" content="{refresh_interval}">', unsafe_allow_html=True)
+
+# Show last update time
+st.sidebar.text(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+if st.sidebar.button("🔄 Refresh Now"):
+    st.rerun()
 
 # ------------------------
 # Load and preprocess APIs with error handling
 # ------------------------
-@st.cache_data
+@st.cache_data(ttl=60)  # Cache for only 60 seconds
 def load_cauldron_data():
     try:
         r = requests.get(f"{BASE_URL}/Data", timeout=10)
@@ -143,11 +161,101 @@ fig.add_trace(
     )
 )
 
+# ------------------------
+# DRAIN DETECTION - Detect significant downward slopes
+# ------------------------
+if len(subset) > 1:
+    subset_sorted = subset.sort_values("timestamp").reset_index(drop=True)
+    
+    # Use rolling window to smooth and detect trends
+    window_size = min(50, len(subset_sorted) // 20)  # Adaptive window size
+    subset_sorted['volume_smooth'] = subset_sorted['volume'].rolling(window=window_size, center=True).mean()
+    
+    drain_periods = []  # Store as tuples of (start_idx, end_idx)
+    
+    in_drain = False
+    min_drain_drop = 5  # Minimum total drop in liters to count as a drain
+    
+    for i in range(window_size, len(subset_sorted) - window_size):
+        prev_smooth = subset_sorted.loc[i - 1, 'volume_smooth']
+        curr_smooth = subset_sorted.loc[i, 'volume_smooth']
+        
+        # Check if smoothed volume is going down
+        if curr_smooth < prev_smooth - 0.1:  # Small threshold
+            if not in_drain:
+                drain_start_idx = i
+                drain_start_volume = curr_smooth
+                in_drain = True
+        elif in_drain:
+            # Check if we've dropped enough to count this as a real drain
+            total_drop = drain_start_volume - subset_sorted.loc[i - 1, 'volume_smooth']
+            if total_drop >= min_drain_drop:
+                drain_periods.append((drain_start_idx, i - 1))
+            in_drain = False
+    
+    # Display debug info
+    st.info(f"🔍 Detected {len(drain_periods)} significant drain periods (drops ≥ {min_drain_drop}L)")
+    
+    # Add drain markers - one per period with a span line
+    for start_idx, end_idx in drain_periods:
+        start_time = subset_sorted.loc[start_idx, "timestamp"]
+        end_time = subset_sorted.loc[end_idx, "timestamp"]
+        start_volume = subset_sorted.loc[start_idx, "volume"]
+        end_volume = subset_sorted.loc[end_idx, "volume"]
+        
+        # Add a yellow shaded region for the drain period
+        fig.add_vrect(
+            x0=start_time,
+            x1=end_time,
+            fillcolor="yellow",
+            opacity=0.1,
+            layer="below",
+            line_width=0,
+        )
+        
+        # Add just ONE label at the start
+        fig.add_annotation(
+            x=start_time,
+            y=start_volume,
+            text="Drain Start",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="yellow",
+            arrowsize=1,
+            arrowwidth=2,
+            ax=0,
+            ay=-30,
+            font=dict(size=9, color="yellow", family="Arial Black"),
+            bgcolor="rgba(0,0,0,0.8)",
+            bordercolor="yellow",
+            borderwidth=1,
+            borderpad=2
+        )
+        
+        # Add just ONE label at the end
+        fig.add_annotation(
+            x=end_time,
+            y=end_volume,
+            text="Drain End",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="yellow",
+            arrowsize=1,
+            arrowwidth=2,
+            ax=0,
+            ay=30,
+            font=dict(size=9, color="yellow", family="Arial Black"),
+            bgcolor="rgba(0,0,0,0.8)",
+            bordercolor="yellow",
+            borderwidth=1,
+            borderpad=2
+        )
+
 # Vertical markers for ticket dates
 if not cauldron_tickets.empty:
     for _, row in cauldron_tickets.iterrows():
-        # Convert pandas Timestamp to datetime for Plotly compatibility
-        ticket_date = pd.to_datetime(row["date"])
+        # Convert pandas Timestamp to datetime and set to end of day (23:59:59)
+        ticket_date = pd.to_datetime(row["date"]).replace(hour=23, minute=59, second=59)
 
         # Use add_shape instead of add_vline for better compatibility
         fig.add_shape(
