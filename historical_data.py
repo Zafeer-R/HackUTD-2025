@@ -146,13 +146,29 @@ fig.add_trace(
 # Vertical markers for ticket dates
 if not cauldron_tickets.empty:
     for _, row in cauldron_tickets.iterrows():
-        fig.add_vline(
-            x=row["date"],
-            line_width=2,
-            line_dash="dash",
-            line_color="red",
-            annotation_text=f"{row['ticket_id']} ({row['amount_collected']} L)",
-            annotation_position="top right",
+        # Convert pandas Timestamp to datetime for Plotly compatibility
+        ticket_date = pd.to_datetime(row["date"])
+
+        # Use add_shape instead of add_vline for better compatibility
+        fig.add_shape(
+            type="line",
+            x0=ticket_date,
+            x1=ticket_date,
+            y0=0,
+            y1=1,
+            yref="paper",
+            line=dict(color="red", width=2, dash="dash"),
+        )
+
+        # Add annotation separately
+        fig.add_annotation(
+            x=ticket_date,
+            y=1,
+            yref="paper",
+            text=f"{row['ticket_id']}<br>({row['amount_collected']} L)",
+            showarrow=False,
+            yshift=10,
+            font=dict(size=10, color="red"),
         )
 
 fig.update_layout(
